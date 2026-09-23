@@ -1,0 +1,4 @@
+function_name,type,order
+calc_line_item_total,S,1
+calc_discount_total,P,2
+calc_tax_total,P,2

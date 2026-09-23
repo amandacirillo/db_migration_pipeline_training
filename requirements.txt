@@ -1,0 +1,4 @@
+# This training's runnable demo has no third-party runtime dependencies - db/migration_runner.py
+# and apps/calc_runner use only the Python standard library (sqlite3, csv, hashlib, threading),
+# on purpose: it should run anywhere with zero external services, matching how the tests run
+# with zero AWS credentials.

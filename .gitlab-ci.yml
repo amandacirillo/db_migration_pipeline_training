@@ -1,0 +1,134 @@
+# A training-sized copy of report-transformation-service's `.gitlab-ci.yml` stage ordering: the
+# specific idea worth teaching here is `build -> test -> migrate -> deploy`, with each
+# environment's `deploy` job `needs:` its own `migrate` job - so a schema migration always
+# finishes, successfully, in a given environment BEFORE new application code that might depend on
+# the new schema gets deployed there. Getting this ordering backwards (deploy code, migrate after)
+# is exactly the kind of change that works fine in a demo and breaks the first time a migration
+# actually needs to run before the new code can function.
+
+stages:
+  - build
+  - test
+  - migrate
+  - deploy
+
+variables:
+  SERVICE_NAME: calc-runner
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+# --- Per-environment variables, mirroring report-transformation-service's .env_dev/.env_stage/
+# .env_prod anchors: LIQUIBASE_ENV there becomes MIGRATION_CONTEXT here - the same changelog
+# directory, filtered differently per environment. ---
+.env_dev: &env_dev
+  environment: dev
+  variables:
+    DEPLOY_ENV: dev
+    MIGRATION_CONTEXT: DEV
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+.env_stage: &env_stage
+  environment: stage
+  variables:
+    DEPLOY_ENV: stage
+    MIGRATION_CONTEXT: STAGE
+  rules:
+    - if: $CI_COMMIT_BRANCH == "stage"
+
+.env_prod: &env_prod
+  environment: production
+  variables:
+    DEPLOY_ENV: production
+    MIGRATION_CONTEXT: PROD
+  rules:
+    - if: $CI_COMMIT_BRANCH == "production"
+
+build:
+  stage: build
+  image: python:3.12-slim
+  script:
+    - pip install -r requirements.txt -r requirements-dev.txt
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+test:
+  stage: test
+  image: python:3.12-slim
+  needs: ["build"]
+  script:
+    - pip install -r requirements.txt -r requirements-dev.txt
+    - pytest -v
+    - cd cdk && npm install && npx tsc --noEmit && npx jest
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# --- Migration template: runs the changelog against the environment's database, gated by
+# MIGRATION_CONTEXT, BEFORE that environment's deploy job is allowed to start (see `needs:`
+# below). In the real service, this is where DATABASE_URL/USERNAME/PASSWORD get pulled live from
+# SSM Parameter Store + Secrets Manager - never hardcoded, never a repo secret. ---
+.migrate_template:
+  stage: migrate
+  image: python:3.12-slim
+  script:
+    - pip install -r requirements.txt
+    - |
+      python -c "
+      import os, sqlite3
+      from pathlib import Path
+      from db.migration_runner import MigrationRunner, load_changelog
+      conn = sqlite3.connect(os.environ.get('DB_PATH', ':memory:'))
+      changesets = load_changelog(Path('migrations/changelog'))
+      applied = MigrationRunner(conn, context=os.environ['MIGRATION_CONTEXT']).run(changesets)
+      print(f'Applied {len(applied)} changeset(s) for context {os.environ[\"MIGRATION_CONTEXT\"]}: {applied}')
+      "
+
+migrate_dev:
+  extends:
+    - .migrate_template
+    - .env_dev
+  needs: ["test"]
+
+migrate_stage:
+  extends:
+    - .migrate_template
+    - .env_stage
+  needs: ["test"]
+
+migrate_prod:
+  extends:
+    - .migrate_template
+    - .env_prod
+  needs: ["test"]
+
+# --- Deploy template: `needs:` its environment's migrate job by name, so GitLab's DAG-mode
+# pipeline (`needs:` instead of purely stage-ordering) will refuse to start a deploy before that
+# exact environment's migration has completed successfully - not just "some earlier stage
+# finished," but specifically the migration this environment depends on. ---
+.deploy_template:
+  stage: deploy
+  image: node:20-slim
+  script:
+    - cd cdk && npm install && npx cdk deploy --all --require-approval=never --context environment=${DEPLOY_ENV}
+
+deploy_dev:
+  extends:
+    - .deploy_template
+    - .env_dev
+  needs: ["migrate_dev"]
+
+deploy_stage:
+  extends:
+    - .deploy_template
+    - .env_stage
+  needs: ["migrate_stage"]
+
+deploy_prod:
+  extends:
+    - .deploy_template
+    - .env_prod
+  needs: ["migrate_prod"]
