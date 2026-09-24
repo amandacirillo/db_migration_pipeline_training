@@ -1,5 +1,7 @@
 # DB Migration Pipeline Training
 
+> **Note:** This is a from-scratch recreation of an architectural pattern I built at my employer, not the original production code -- rebuilt with a fabricated/generic domain and no proprietary business logic, credentials, or internal resource identifiers.
+
 A small, runnable model of the **Liquibase-gated CI/CD pipeline + config-driven SQS Lambda**
 pattern used by `report-transformation-service`. It reimplements the shape of that pipeline
 against a generic **"order totals calculation"** domain (`orderId`, `line_item_total`,
